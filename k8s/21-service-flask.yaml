@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Service
+metadata: { name: flask, namespace: geo }
+spec:
+  type: ClusterIP
+  selector: { app: flask }
+  ports: [{ port: 80, targetPort: 8080 }]

@@ -1,0 +1,18 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata: { name: geo-demo, region: us-east-1, version: "1.29" }
+iam: { withOIDC: true }
+availabilityZones: ["us-east-1a","us-east-1b","us-east-1c"]
+managedNodeGroups:
+  - name: mng-xlarge
+    instanceType: m5.xlarge
+    desiredCapacity: 3
+    minSize: 3
+    maxSize: 6
+    volumeSize: 50
+    ssh: { enableSsm: true }
+    labels: { role: worker }
+addons:
+  - name: vpc-cni
+  - name: kube-proxy
+  - name: coredns

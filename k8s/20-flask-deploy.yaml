@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: flask, namespace: geo }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: flask } }
+  template:
+    metadata: { labels: { app: flask } }
+    spec:
+      serviceAccountName: app-sa
+      containers:
+      - name: app
+        image: <YOUR_ECR_OR_DOCKERHUB_REPO>/geo-flask:latest
+        imagePullPolicy: IfNotPresent
+        ports: [{containerPort: 8080}]
+        env:
+          - { name: S3_BUCKET, value: ${BUCKET} }
+          - { name: DB_HOST, value: postgres.geo.svc.cluster.local }
+          - name: DB_USER
+            valueFrom: {secretKeyRef: {name: pg-credentials, key: username}}
+          - name: DB_PASS
+            valueFrom: {secretKeyRef: {name: pg-credentials, key: password}}
+          - name: DB_NAME
+            valueFrom: {secretKeyRef: {name: pg-credentials, key: database}}
+        readinessProbe:
+          httpGet: { path: /up, port: 8080 }
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: { path: /up, port: 8080 }
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests: { cpu: "200m", memory: "256Mi" }
+          limits:   { cpu: "1000m", memory: "512Mi" }

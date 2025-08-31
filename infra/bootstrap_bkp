@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+AWS_REGION=${AWS_REGION:-us-east-1}
+CLUSTER=${CLUSTER:-geo-demo}
+BUCKET=${BUCKET:-$USER-geo-demo-uploads}
+NS=geo
+
+# S3
+if [ "$AWS_REGION" = "us-east-1" ]; then
+  aws s3api create-bucket --bucket "$BUCKET" --region "$AWS_REGION" >/dev/null 2>&1 || true
+else
+  aws s3api create-bucket --bucket "$BUCKET" --region "$AWS_REGION" \
+    --create-bucket-configuration LocationConstraint="$AWS_REGION" >/dev/null 2>&1 || true
+fi
+aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled || true
+
+# EKS
+eksctl create cluster -f infra/cluster.yaml
+kubectl get ns "$NS" >/dev/null 2>&1 || kubectl create ns "$NS"
+
+# metrics-server
+helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ >/dev/null 2>&1 || true
+helm upgrade --install metrics-server metrics-server/metrics-server \
+  -n kube-system --set args="{--kubelet-insecure-tls}" >/dev/null
+
+# ALB controller
+curl -sSL https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.1/docs/install/iam_policy.json \
+  -o /tmp/alb-policy.json
+aws iam create-policy --policy-name AWSLoadBalancerControllerIAMPolicy \
+  --policy-document file:///tmp/alb-policy.json >/dev/null 2>&1 || true
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+eksctl create iamserviceaccount \
+  --cluster "$CLUSTER" --region "$AWS_REGION" \
+  -n kube-system --name aws-load-balancer-controller \
+  --attach-policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy \
+  --override-existing-serviceaccounts --approve >/dev/null
+helm repo add eks https://aws.github.io/eks-charts >/dev/null 2>&1 || true
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system --set clusterName="$CLUSTER" \
+  --set serviceAccount.create=false --set serviceAccount.name=aws-load-balancer-controller >/dev/null
+
+# ---------- App IRSA (S3 access) — no temp files ----------
+say "Ensuring IRSA for app to access S3 ($BUCKET)"
+APP_POLICY_NAME="${CLUSTER}-s3-upload-policy"
+PROFILE_FLAG=${AWS_PROFILE:+--profile "$AWS_PROFILE"}
+
+# Inline JSON (compact, no newlines to avoid CRLF issues)
+POLICY_DOC='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::'"$BUCKET"'"]},{"Effect":"Allow","Action":["s3:PutObject","s3:GetObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::'"$BUCKET"'/*"]}]}'
+
+# Look up existing policy ARN (local/customer managed)
+APP_POLICY_ARN=$(aws iam list-policies --scope Local \
+  --query "Policies[?PolicyName=='$APP_POLICY_NAME'].Arn" \
+  --output text $PROFILE_FLAG 2>/dev/null || echo "")
+
+if [ -z "$APP_POLICY_ARN" ] || [ "$APP_POLICY_ARN" = "None" ]; then
+  say "Creating customer-managed policy $APP_POLICY_NAME"
+  # Create policy directly from the inline JSON
+  aws iam create-policy \
+    --policy-name "$APP_POLICY_NAME" \
+    --policy-document "$POLICY_DOC" \
+    $PROFILE_FLAG >/dev/null
+  # Fetch ARN after create
+  APP_POLICY_ARN=$(aws iam list-policies --scope Local \
+    --query "Policies[?PolicyName=='$APP_POLICY_NAME'].Arn" \
+    --output text $PROFILE_FLAG)
+else
+  say "Policy $APP_POLICY_NAME already exists, ARN: $APP_POLICY_ARN"
+fi
+
+# Recreate/ensure the ServiceAccount with this IAM policy (IRSA)
+kubectl -n "$NS" delete sa app-sa --ignore-not-found >/dev/null 2>&1 || true
+eksctl create iamserviceaccount \
+  --cluster "$CLUSTER" \
+  --region "$AWS_REGION" \
+  --namespace "$NS" \
+  --name app-sa \
+  --attach-policy-arn "$APP_POLICY_ARN" \
+  --override-existing-serviceaccounts \
+  --approve
+echo "export AWS_REGION=$AWS_REGION"
+echo "export CLUSTER=$CLUSTER"
+echo "export BUCKET=$BUCKET"
