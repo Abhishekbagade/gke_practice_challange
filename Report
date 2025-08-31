@@ -1,0 +1,154 @@
+Prerequisites
+
+Installed tools:
+AWS CLI v2 (aws --version)
+eksctl (eksctl version)
+kubectl (kubectl version --client)
+helm (helm version)
+Docker Desktop (optional, for local build)
+
+AWS Setup:
+SSO / IAM user with AdministratorAccess or EKS privileges.
+Region: us-east-1.
+Repo on GitHub: gke_practice_challange.
+
+Bootstrap Infrastructure
+Run once:
+./infra/bootstrap.sh
+
+Creates:
+S3 bucket (abhis-geo-demo-uploads)
+EKS cluster (geo-demo)
+Updates kubeconfig context (geo-demo)
+Verifies API reachability
+
+Check:
+kubectl get nodes
+kubectl get pods -n kube-system
+
+ALB Ingress Controller
+Create IAM Policy
+
+aws iam create-policy \
+  --policy-name AWSLoadBalancerControllerIAMPolicy \
+  --policy-document file://alb-iam-policy.json
+
+Create IRSA ServiceAccount
+
+eksctl create iamserviceaccount \
+  --cluster geo-demo \
+  --region us-east-1 \
+  --namespace kube-system \
+  --name aws-load-balancer-controller \
+  --attach-policy-arn arn:aws:iam::<account-id>:policy/AWSLoadBalancerControllerIAMPolicy \
+  --override-existing-serviceaccounts \
+  --approve
+
+Install via Helm
+
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --set clusterName=geo-demo \
+  --set region=us-east-1 \
+  --set vpcId=<your-vpc-id> \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller
+
+
+Verify:
+
+kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+
+EBS CSI Driver (gp3 volumes)
+
+Enable add-on
+
+aws eks create-addon \
+  --cluster-name geo-demo \
+  --region us-east-1 \
+  --addon-name aws-ebs-csi-driver \
+  --resolve-conflicts OVERWRITE
+
+
+Create IRSA Role
+
+eksctl create iamserviceaccount \
+  --cluster geo-demo \
+  --region us-east-1 \
+  --namespace kube-system \
+  --name ebs-csi-controller-sa \
+  --attach-policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy \
+  --override-existing-serviceaccounts \
+  --approve
+
+
+Set gp3 as default
+kubectl apply -f k8s/01-storageclass-gp3.yaml
+Postgres StatefulSet
+Secrets for DB credentials
+kubectl -n geo create secret generic pg-credentials \
+  --from-literal=username=postgres \
+  --from-literal=password=StrongPass123 \
+  --from-literal=database=geo_db
+
+
+Apply manifests
+kubectl -n geo apply -f k8s/02-postgres-statefulset.yaml
+kubectl -n geo apply -f k8s/03-service-postgres.yaml
+
+
+Check:
+kubectl get pods -n geo -l app=postgres
+kubectl get pvc -n geo
+
+
+PVC should be Bound, pod Running.
+Flask App
+Deploy App
+kubectl -n geo apply -f k8s/20-flask-deploy.yaml
+kubectl -n geo apply -f k8s/21-service-flask.yaml
+
+
+Expose via Ingress
+kubectl -n geo apply -f k8s/22-ingress.yaml
+
+
+Check:
+kubectl get ingress -n geo
+An AWS ALB hostname should appear.
+Horizontal Pod Autoscaler (HPA)
+kubectl -n geo apply -f k8s/30-hpa.yaml
+kubectl get hpa -n geo
+Ensures Flask app scales automatically under load.
+
+Validation
+DB: connect inside pod:
+kubectl exec -it postgres-0 -n geo -- psql -U postgres -d geo_db
+
+App: curl via ALB DNS:
+curl http://<ALB-DNS>
+
+GitHub Integration
+git init
+git remote add <repo_url>
+git branch -M main
+git add .
+git commit -m "EKS Flask/Postgres project"
+git push -u origin main
+
+
+Repo: github.com/Abhishekbagade/gke_practice_challange
+
+
+End-to-End Flow Summary
+Bootstrap infra (EKS, S3, kubeconfig)
+Install ALB Controller (IRSA + Helm)
+Enable EBS CSI Driver (gp3 storage + IRSA)
+Deploy Postgres StatefulSet (PVC bound, pod running)
+Deploy Flask App + Service
+Ingress via ALB (get DNS)
+Scale with HPA
+Test connectivity (DB + App)
+Push to GitHub for version control
